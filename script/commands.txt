@@ -1,0 +1,19 @@
+uv run python script/train.py \
+    --model-name "tiny-story" \
+    --wandb-project "cs336-assignment-1" \
+    --wandb-run-name "local-test-2" \
+    --train-data tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-train.npy \
+    --val-data tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-valid.npy \
+    --vocab-size 10000 \
+    --context-length 256 \
+    --d-model 512 \
+    --d-ff 1344 \
+    --rope-theta 10000 \
+    --num-layers 4 \
+    --num-heads 16 \
+    --total-token 327680000 \
+    --batch-size 32 \
+    --learning-rate 0.00003 \
+    --log-interval 10 \
+    --val-interval 100 \
+    --checkpoint-interval 1000

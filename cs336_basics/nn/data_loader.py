@@ -12,4 +12,4 @@ def load_data(x, batch_size, context_length, device):
     )    
     x_indices = start_indices[:, np.newaxis] + np.arange(context_length)
     y_indices = x_indices + 1
-    return torch.tensor(x[x_indices]).to(device), torch.tensor(x[y_indices]).to(device)
+    return torch.tensor(x[x_indices]).to(torch.long).to(device), torch.tensor(x[y_indices]).to(torch.long).to(device)

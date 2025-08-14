@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 from datetime import datetime
+import wandb
 
 # Add parent directory to path to import cs336_basics
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +38,8 @@ def parse_args():
                         help='Path to training data (numpy memmap file)')
     parser.add_argument('--val-data', type=str, required=True,
                         help='Path to validation data (numpy memmap file)')
+    parser.add_argument('--total-token', type=int, required=True,
+                        help='total token processed')                        
     parser.add_argument('--data-dtype', type=str, default='uint16',
                         help='Data type of the numpy arrays (default: uint16)')
     
@@ -44,7 +47,7 @@ def parse_args():
     parser.add_argument('--vocab-size', type=int, required=True,
                         help='Vocabulary size')
     parser.add_argument('--context-length', type=int, default=256,
-                        help='Maximum context length (default: 256)')
+                        help='Maximum context length (default: 256)')                      
     parser.add_argument('--d-model', type=int, default=512,
                         help='Model dimension (default: 512)')
     parser.add_argument('--num-layers', type=int, default=6,
@@ -63,8 +66,6 @@ def parse_args():
                         help='Number of training iterations (default: 10000)')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                         help='Maximum learning rate (default: 3e-4)')
-    parser.add_argument('--min-learning-rate', type=float, default=3e-5,
-                        help='Minimum learning rate (default: 3e-5)')
     parser.add_argument('--warmup-iters', type=int, default=100,
                         help='Number of warmup iterations (default: 100)')
     parser.add_argument('--weight-decay', type=float, default=0.1,
@@ -91,6 +92,16 @@ def parse_args():
     # Device arguments
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='Device to use for training (default: cuda if available)')
+    
+    # Experiment tracking arguments
+    parser.add_argument('--model-name', type=str, default='transformer-lm',
+                        help='Name of the model for experiment tracking (default: transformer-lm)')
+    parser.add_argument('--wandb-project', type=str, default='cs336-basics',
+                        help='Wandb project name (default: cs336-basics)')
+    parser.add_argument('--wandb-run-name', type=str, default=None,
+                        help='Wandb run name (default: auto-generated)')
+    parser.add_argument('--no-wandb', action='store_true',
+                        help='Disable wandb logging')
     
     return parser.parse_args()
 
@@ -143,8 +154,43 @@ def evaluate(model, val_data, batch_size, context_length, device, num_batches=10
 def main():
     args = parse_args()
     
-    # Create checkpoint directory
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    # Calculate min_learning_rate as 10% of learning_rate
+    args.min_learning_rate = args.learning_rate * 0.1
+    
+    num_iterations = int(args.total_token / (args.batch_size * args.context_length))
+    # Generate run name if not provided
+    if args.wandb_run_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.wandb_run_name = f"{args.model_name}_{timestamp}"
+    
+    # Initialize wandb if enabled
+    if not args.no_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            config={
+                'model_name': args.model_name,
+                'vocab_size': args.vocab_size,
+                'context_length': args.context_length,
+                'd_model': args.d_model,
+                'num_layers': args.num_layers,
+                'num_heads': args.num_heads,
+                'd_ff': args.d_ff,
+                'rope_theta': args.rope_theta,
+                'batch_size': args.batch_size,
+                'num_iterations': num_iterations,
+                'learning_rate': args.learning_rate,
+                'min_learning_rate': args.min_learning_rate,
+                'warmup_iters': args.warmup_iters,
+                'weight_decay': args.weight_decay,
+                'grad_clip': args.grad_clip,
+            }
+        )
+    
+    # Create checkpoint directory with model_name/run_name structure
+    checkpoint_path = os.path.join(args.checkpoint_dir, args.model_name, args.wandb_run_name)
+    os.makedirs(checkpoint_path, exist_ok=True)
+    print(f"Checkpoints will be saved to: {checkpoint_path}")
     
     # Set device
     device = torch.device(args.device)
@@ -178,6 +224,10 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     
+    # Log model info to wandb
+    if not args.no_wandb:
+        wandb.config.update({'total_params': total_params})
+    
     # Initialize optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -202,8 +252,9 @@ def main():
     train_losses = []
     train_start_time = time.time()
     iteration_times = []
+    global_step = start_iteration
     
-    for iteration in range(start_iteration, args.num_iterations):
+    for iteration in range(start_iteration, num_iterations):
         iter_start_time = time.time()
         
         # Get learning rate for this iteration
@@ -212,7 +263,7 @@ def main():
             args.learning_rate,
             args.min_learning_rate,
             args.warmup_iters,
-            args.num_iterations
+            num_iterations
         )
         
         # Update learning rate
@@ -245,6 +296,21 @@ def main():
         # Track metrics
         train_losses.append(loss.item())
         iteration_times.append(time.time() - iter_start_time)
+        global_step = iteration + 1
+        
+        # Calculate elapsed time
+        elapsed_time = time.time() - train_start_time
+        
+        # Log to wandb every step
+        if not args.no_wandb:
+            wandb.log({
+                'train/loss': loss.item(),
+                'train/learning_rate': lr,
+                'train/gradient_step': global_step,
+                'train/wallclock_time': elapsed_time,
+                'train/tokens_per_second': (args.batch_size * args.context_length) / iteration_times[-1],
+                'train/time_per_iteration': iteration_times[-1],
+            }, step=global_step)
         
         # Logging
         if (iteration + 1) % args.log_interval == 0:
@@ -253,7 +319,7 @@ def main():
             tokens_per_sec = (args.batch_size * args.context_length) / avg_time
             
             elapsed = time.time() - train_start_time
-            print(f"Iter {iteration + 1}/{args.num_iterations} | "
+            print(f"Iter {iteration + 1}/{num_iterations} | "
                   f"Loss: {avg_loss:.4f} | "
                   f"LR: {lr:.2e} | "
                   f"Tokens/sec: {tokens_per_sec:.0f} | "
@@ -265,25 +331,43 @@ def main():
             val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
                               device, args.val_batches)
             print(f"Validation loss: {val_loss:.4f}")
+            
+            # Log validation metrics to wandb
+            if not args.no_wandb:
+                wandb.log({
+                    'val/loss': val_loss,
+                    'val/gradient_step': global_step,
+                    'val/wallclock_time': elapsed_time,
+                }, step=global_step)
         
         # Save checkpoint
         if (iteration + 1) % args.checkpoint_interval == 0:
-            checkpoint_path = os.path.join(
-                args.checkpoint_dir,
+            checkpoint_file = os.path.join(
+                checkpoint_path,
                 f"checkpoint_iter_{iteration + 1}.pt"
             )
-            save_checkpoint(model, optimizer, iteration + 1, checkpoint_path)
-            print(f"Saved checkpoint to {checkpoint_path}")
+            save_checkpoint(model, optimizer, iteration + 1, checkpoint_file)
+            print(f"Saved checkpoint to {checkpoint_file}")
     
     # Save final checkpoint
-    final_checkpoint_path = os.path.join(args.checkpoint_dir, "final_checkpoint.pt")
-    save_checkpoint(model, optimizer, args.num_iterations, final_checkpoint_path)
-    print(f"Training complete! Final checkpoint saved to {final_checkpoint_path}")
+    final_checkpoint_file = os.path.join(checkpoint_path, "final_checkpoint.pt")
+    save_checkpoint(model, optimizer, num_iterations, final_checkpoint_file)
+    print(f"Training complete! Final checkpoint saved to {final_checkpoint_file}")
     
     # Final validation
     final_val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
                             device, args.val_batches * 10)  # More batches for final eval
     print(f"Final validation loss: {final_val_loss:.4f}")
+    
+    # Log final metrics to wandb
+    if not args.no_wandb:
+        final_elapsed_time = time.time() - train_start_time
+        wandb.log({
+            'final/val_loss': final_val_loss,
+            'final/total_training_time': final_elapsed_time,
+            'final/total_gradient_steps': num_iterations,
+        })
+        wandb.finish()
 
 
 if __name__ == "__main__":

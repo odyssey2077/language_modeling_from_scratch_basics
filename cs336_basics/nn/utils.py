@@ -1,5 +1,6 @@
 import math
 import torch
+import torch.nn as nn
 import numpy as np
 from collections.abc import Iterable
 from cs336_basics.nn.functions import softmax
@@ -12,22 +13,32 @@ def cosine_lr_schedule(t: int, alpha_max: float, alpha_min: float, t_w: int, t_c
     else:
         return alpha_min
 
-def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float, epsilon=1e-6):
-    grad_data = []
-    for p in parameters:
-        if p.grad is not None:
-            grad_data.append(p.grad.data.view(-1))
+def gradient_clipping(parameters: Iterable[nn.Parameter], max_norm: float):
+    """
+    Correctly clips the gradients of a model's parameters.
 
-    if len(grad_data) == 0:
+    Args:
+        parameters: An iterable of parameters to clip the gradients of.
+        max_norm: The maximum L2 norm of the gradients.
+    """
+    # Filter for parameters that have gradients
+    params_with_grad = [p for p in parameters if p.grad is not None]
+    if not params_with_grad:
         return
 
-    all_grads = torch.cat(grad_data)
-    l2_norm = torch.norm(all_grads).item()
+    # Calculate the total L2 norm of all gradients
+    # We use a generator expression for memory efficiency
+    total_norm = torch.norm(
+        torch.stack([torch.norm(p.grad.detach(), 2) for p in params_with_grad]), 2
+    )
 
-    if l2_norm > max_l2_norm:
-        for p in parameters:
-            if p.grad is not None:
-                p.grad.data = p.grad.data * (max_l2_norm / (l2_norm + epsilon))
+    # Calculate the clipping ratio
+    clip_coef = max_norm / (total_norm + 1e-6)
+
+    # Clip the gradients if the total norm exceeds max_norm
+    if clip_coef < 1:
+        for p in params_with_grad:
+            p.grad.detach().mul_(clip_coef)
 
 # assume prompt is a one dimension tensor with shape [seq_len]
 def decode(model: torch.nn.Module, prompt: torch.Tensor, special_token_id: int = -1, max_num_tokens: int | None = None, temperature: float | None = None, p: float | None = None) -> torch.Tensor:    
