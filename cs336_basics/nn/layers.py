@@ -124,7 +124,7 @@ class CausalMultiHeadAttention(nn.Module):
           Q = self.rope(Q,token_positions)                  
           K = self.rope(K, token_positions)
         
-        mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool)
+        mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool).to(self.w_q.device)
         return self.w_o(rearrange(scaled_dot_product_attention(Q, K, V, self.d_k, mask), '... num_heads seq_len d_v -> ... seq_len (num_heads d_v)'))
     
 
