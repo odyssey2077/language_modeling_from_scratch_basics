@@ -1,9 +1,9 @@
 uv run python script/train.py \
     --model-name "tiny-story" \
     --wandb-project "cs336-assignment-1" \
-    --wandb-run-name "local-test-2" \
-    --train-data tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-train.npy \
-    --val-data tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-valid.npy \
+    --wandb-run-name "runpod-test-1" \
+    --train-data /workspace/tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-train.npy \
+    --val-data /workspace/tokenizer_output/tiny_story_train/TinyStoriesV2-GPT4-valid.npy \
     --vocab-size 10000 \
     --context-length 256 \
     --d-model 512 \

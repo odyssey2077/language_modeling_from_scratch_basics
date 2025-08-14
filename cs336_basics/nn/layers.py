@@ -24,11 +24,12 @@ class Linear(nn.Module):
 class Embedding(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
         super().__init__()
+        self.device = device
         self.embedding_table = nn.Parameter(data=nn.init.trunc_normal_(torch.empty(num_embeddings, embedding_dim, dtype=dtype, device=device), 
                                                               mean=0., std=1.0, a=-3.0, b=3.0))
     
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        indices_tensor = torch.LongTensor(token_ids)
+        indices_tensor = torch.LongTensor(token_ids).to(self.device)
         return self.embedding_table[indices_tensor]
 
 
