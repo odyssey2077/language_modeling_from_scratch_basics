@@ -29,7 +29,7 @@ class Embedding(nn.Module):
                                                               mean=0., std=1.0, a=-3.0, b=3.0))
     
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
-        indices_tensor = torch.LongTensor(token_ids).to(self.device)
+        indices_tensor = token_ids.to(self.embedding_table.device).long()
         return self.embedding_table[indices_tensor]
 
 
