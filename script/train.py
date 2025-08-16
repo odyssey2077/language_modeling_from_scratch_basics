@@ -127,6 +127,10 @@ def load_data_memmap(file_path, dtype='uint16'):
     return np.memmap(memmap_path, dtype=dtype, mode='r', shape=shape)
 
 
+def load_data_memmap_v2(file_path, dtype='uint16'):
+    # return np.load(file_path, mmap_mode='r')
+    return np.load(file_path)
+
 def evaluate(model, val_data, batch_size, context_length, device, num_batches=10):
     """Evaluate model on validation data."""
     model.eval()
@@ -198,11 +202,11 @@ def main():
     
     # Load data as memory-mapped arrays
     print("Loading training data...")
-    train_data = load_data_memmap(args.train_data, args.data_dtype)
+    train_data = load_data_memmap_v2(args.train_data, args.data_dtype)
     print(f"Training data shape: {train_data.shape}")
     
     print("Loading validation data...")
-    val_data = load_data_memmap(args.val_data, args.data_dtype)
+    val_data = load_data_memmap_v2(args.val_data, args.data_dtype)
     print(f"Validation data shape: {val_data.shape}")
     
     # Initialize model
