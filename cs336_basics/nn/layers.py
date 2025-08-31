@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import math
-from einops import rearrange, einsum
+from einops import rearrange, einsum, repeat
 from cs336_basics.nn.functions import scaled_dot_product_attention, softmax
 
 
@@ -121,17 +121,134 @@ class CausalMultiHeadAttention(nn.Module):
         V = rearrange(V, '... seq_len (num_heads d_v) -> ... num_heads seq_len d_v', num_heads=self.num_heads)
 
         if self.rope is not None:
-          Q = self.rope(Q,token_positions)                  
+          Q = self.rope(Q, token_positions)                  
           K = self.rope(K, token_positions)
         
         mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool).to(self.w_q.device)
         return self.w_o(rearrange(scaled_dot_product_attention(Q, K, V, self.d_k, mask), '... num_heads seq_len d_v -> ... seq_len (num_heads d_v)'))
     
 
-class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, device=None, dtype=None, max_seq_length: int | None = None, theta: float | None = None):
+class CausalMultiQueryAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, device=None, dtype=None, max_seq_length: int | None = None, theta: float | None = None):
         super().__init__()
-        self.mha = CausalMultiHeadAttention(d_model, num_heads, device, dtype, max_seq_length, theta)
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.w_q = Linear(d_model, d_model, device, dtype)
+        self.w_k = Linear(d_model, self.d_k, device, dtype)
+        self.w_v = Linear(d_model, self.d_v, device, dtype)
+        self.w_o = Linear(d_model, d_model, device, dtype)
+        if max_seq_length is not None:
+            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_length, device)
+        else:
+            self.rope = None
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        Q = self.w_q(x)
+        K = self.w_k(x)
+        V = self.w_v(x)
+        Q = rearrange(Q, '... seq_len (num_heads d_q) -> ... num_heads seq_len d_q', num_heads=self.num_heads)
+        K = repeat(K, '... seq_len d_k -> ... num_heads seq_len d_k', num_heads=self.num_heads)
+        V = repeat(V, '... seq_len d_v -> ... num_heads seq_len d_v', num_heads=self.num_heads)
+        
+        if self.rope is not None:
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
+
+        mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool).to(self.w_q.device)
+        return self.w_o(rearrange(scaled_dot_product_attention(Q, K, V, self.d_k, mask), '... num_heads seq_len d_v -> ... seq_len (num_heads d_v)'))
+
+
+class CausalGroupQueryAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, group_size: int, device=None, dtype=None, max_seq_length: int | None = None, theta: float | None = None):
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.group_size = group_size
+        self.member_per_group = num_heads // group_size
+        assert num_heads % group_size == 0, "invalid GQA group size"
+        self.w_q = Linear(d_model, d_model, device, dtype)
+        self.w_k = Linear(d_model, self.d_k * group_size, device, dtype)
+        self.w_v = Linear(d_model, self.d_v * group_size, device, dtype)
+        self.w_o = Linear(d_model, d_model, device, dtype)
+        if max_seq_length is not None:
+            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_length, device)
+        else:
+            self.rope = None
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        Q = self.w_q(x)
+        K = self.w_k(x)
+        V = self.w_v(x)
+        Q = rearrange(Q, '... seq_len (num_heads d_q) -> ... num_heads seq_len d_q', num_heads=self.num_heads)
+        K = rearrange(K, '... seq_len (group_size d_k) -> ... group_size seq_len d_k', group_size=self.group_size)
+        V = rearrange(V, '... seq_len (group_size d_v) -> ... group_size seq_len d_v', group_size=self.group_size)
+
+        if self.rope is not None:
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
+
+        K = repeat(K, '... group_size seq_len d_k -> ... (group_size r) seq_len d_k', r=self.member_per_group)
+        V = repeat(V, '... group_size seq_len d_v -> ... (group_size r) seq_len d_v', r=self.member_per_group)        
+
+        mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool).to(self.w_q.device)
+        return self.w_o(rearrange(scaled_dot_product_attention(Q, K, V, self.d_k, mask), '... num_heads seq_len d_v -> ... seq_len (num_heads d_v)'))
+
+
+class CausalMultiLatentAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_c: int, device=None, dtype=None, max_seq_length: int | None = None, theta: float | None = None):
+        super().__init__()
+        assert d_model % num_heads == 0, "invalid d_model num_head configuration"
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.d_v = d_model // num_heads
+        self.w_q = Linear(d_model, d_model, device, dtype)
+        self.w_c = Linear(d_model, d_c, device, dtype)
+        self.w_k = Linear(d_c, d_model, device, dtype)
+        self.w_v = Linear(d_c, d_model, device, dtype)
+        self.w_o = Linear(d_model, d_model, device, dtype)
+        if max_seq_length is not None:
+            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_length, device)
+        else:
+            self.rope = None
+
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        Q = self.w_q(x)
+        C = self.w_c(x)
+        K = self.w_k(C)
+        V = self.w_v(C)
+        Q = rearrange(Q, '... seq_len (num_heads d_k) -> ... num_heads seq_len d_k', num_heads=self.num_heads)
+        K = rearrange(K, '... seq_len (num_heads d_k) -> ... num_heads seq_len d_k', num_heads=self.num_heads)        
+        V = rearrange(V, '... seq_len (num_heads d_v) -> ... num_heads seq_len d_v', num_heads=self.num_heads)
+
+        # vanilla implementation not compatible with rope
+        # if self.rope is not None:
+        #   Q = self.rope(Q, token_positions)                  
+        #   K = self.rope(K, token_positions)
+        
+        mask = torch.tril(torch.ones(seq_len, seq_len)).to(torch.bool).to(self.w_q.device)
+        return self.w_o(rearrange(scaled_dot_product_attention(Q, K, V, self.d_k, mask), '... num_heads seq_len d_v -> ... seq_len (num_heads d_v)'))
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, attn_type, d_model: int, num_heads: int, d_ff: int, device=None, dtype=None, max_seq_length: int | None = None, theta: float | None = None, group_size=None, d_c=None):
+        super().__init__()
+        if attn_type == 'mha':
+            self.attention = CausalMultiHeadAttention(d_model, num_heads, device, dtype, max_seq_length, theta)
+        elif attn_type == 'mqa':
+            self.attention = CausalMultiQueryAttention(d_model, num_heads, device, dtype, max_seq_length, theta)
+        elif attn_type == 'gqa':
+            self.attention = CausalGroupQueryAttention(d_model, num_heads, group_size, device, dtype, max_seq_length, theta)
+        elif attn_type == 'mla':
+            self.attention = CausalMultiLatentAttention(d_model, num_heads, d_c, device, dtype, max_seq_length, theta)
+        
+        
+
         self.ffn = FFN(d_model, d_ff, device, dtype)
         self.mha_norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.ffn_norm = RMSNorm(d_model, device=device, dtype=dtype)
@@ -139,15 +256,15 @@ class TransformerBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         seq_len = x.shape[-2]
         token_positions = torch.arange(seq_len, device=x.device)
-        mha_output = self.mha(self.mha_norm(x), token_positions) + x
+        mha_output = self.attention(self.mha_norm(x), token_positions) + x
         return self.ffn(self.ffn_norm(mha_output)) + mha_output
     
 
 class TransformerLM(nn.Module):
-    def __init__(self, vocab_size, context_length, num_layers, d_model: int, num_heads: int, d_ff: int, device=None, dtype=None, theta: float | None = None):
+    def __init__(self, attn_type, vocab_size, context_length, num_layers, d_model: int, num_heads: int, d_ff: int, device=None, dtype=None, theta: float | None = None, group_size=None, d_c=None):
         super().__init__()
         self.embedding = Embedding(vocab_size, d_model, device, dtype)
-        self.blocks = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, device, dtype, context_length, theta) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList([TransformerBlock(attn_type, d_model, num_heads, d_ff, device, dtype, context_length, theta, group_size, d_c) for _ in range(num_layers)])
         self.output_norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.o_linear = Linear(d_model, vocab_size, device, dtype)
     

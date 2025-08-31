@@ -46,6 +46,12 @@ def parse_args():
     # Model arguments
     parser.add_argument('--vocab-size', type=int, required=True,
                         help='Vocabulary size')
+    parser.add_argument('--attn-type', type=str, default='mha',
+                        help='attention type')     
+    parser.add_argument('--group-size', type=int, default='0',
+                        help='group size for gqa') 
+    parser.add_argument('--d-c', type=int, default='0',
+                        help='d_c for mla')                                                                     
     parser.add_argument('--context-length', type=int, default=256,
                         help='Maximum context length (default: 256)')                      
     parser.add_argument('--d-model', type=int, default=512,
@@ -106,30 +112,30 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_data_memmap(file_path, dtype='uint16'):
-    """Load data using memory-mapped numpy array for efficiency."""
-    # First, get the shape by loading the full array temporarily
-    temp_array = np.load(file_path)
-    shape = temp_array.shape
-    del temp_array
+# def load_data_memmap(file_path, dtype='uint16'):
+#     """Load data using memory-mapped numpy array for efficiency."""
+#     # First, get the shape by loading the full array temporarily
+#     temp_array = np.load(file_path)
+#     shape = temp_array.shape
+#     del temp_array
     
-    # Create a memory-mapped array
-    memmap_path = file_path.replace('.npy', '.memmap')
-    if not os.path.exists(memmap_path):
-        # Create memmap file from npy
-        arr = np.load(file_path)
-        memmap_arr = np.memmap(memmap_path, dtype=dtype, mode='w+', shape=arr.shape)
-        memmap_arr[:] = arr[:]
-        memmap_arr.flush()
-        del arr
+#     # Create a memory-mapped array
+#     memmap_path = file_path.replace('.npy', '.memmap')
+#     if not os.path.exists(memmap_path):
+#         # Create memmap file from npy
+#         arr = np.load(file_path)
+#         memmap_arr = np.memmap(memmap_path, dtype=dtype, mode='w+', shape=arr.shape)
+#         memmap_arr[:] = arr[:]
+#         memmap_arr.flush()
+#         del arr
     
-    # Return memory-mapped array
-    return np.memmap(memmap_path, dtype=dtype, mode='r', shape=shape)
+#     # Return memory-mapped array
+#     return np.memmap(memmap_path, dtype=dtype, mode='r', shape=shape)
 
 
 def load_data_memmap_v2(file_path, dtype='uint16'):
-    # return np.load(file_path, mmap_mode='r')
-    return np.load(file_path)
+    return np.load(file_path, mmap_mode='r')
+    # return np.load(file_path)
 
 def evaluate(model, val_data, batch_size, context_length, device, num_batches=10):
     """Evaluate model on validation data."""
@@ -174,6 +180,9 @@ def main():
             name=args.wandb_run_name,
             config={
                 'model_name': args.model_name,
+                'attn_type': args.attn_type,
+                'group_size': args.group_size,
+                'd_c': args.d_c,
                 'vocab_size': args.vocab_size,
                 'context_length': args.context_length,
                 'd_model': args.d_model,
@@ -213,17 +222,20 @@ def main():
     print("Initializing model...")
     model = TransformerLM(
         vocab_size=args.vocab_size,
+        attn_type=args.attn_type,
         context_length=args.context_length,
         num_layers=args.num_layers,
         d_model=args.d_model,
         num_heads=args.num_heads,
         d_ff=args.d_ff,
         device=device,
+        group_size=args.group_size,
+        d_c=args.d_c,
         dtype=torch.float32,
         theta=args.rope_theta
     )
     model = model.to(device)
-    
+    model = torch.compile(model)
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
@@ -257,121 +269,121 @@ def main():
     train_start_time = time.time()
     iteration_times = []
     global_step = start_iteration
-    
-    for iteration in range(start_iteration, num_iterations):
-        iter_start_time = time.time()
-        
-        # Get learning rate for this iteration
-        lr = cosine_lr_schedule(
-            iteration,
-            args.learning_rate,
-            args.min_learning_rate,
-            args.warmup_iters,
-            num_iterations
-        )
-        
-        # Update learning rate
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-        
-        # Load batch
-        x, y = load_data(train_data, args.batch_size, args.context_length, device)
-        
-        # Forward pass
-        logits = model(x)
-        
-        # Calculate loss
-        # Reshape for cross entropy: (batch * seq_len, vocab_size)
-        logits_flat = logits.view(-1, logits.size(-1))
-        targets_flat = y.view(-1)
-        
-        loss = cross_entropy_loss(logits_flat, targets_flat)
-        
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # Gradient clipping
-        gradient_clipping(model.parameters(), args.grad_clip)
-        
-        # Optimizer step
-        optimizer.step()
-        
-        # Track metrics
-        train_losses.append(loss.item())
-        iteration_times.append(time.time() - iter_start_time)
-        global_step = iteration + 1
-        
-        # Calculate elapsed time
-        elapsed_time = time.time() - train_start_time
-        
-        # Log to wandb every step
-        if not args.no_wandb:
-            wandb.log({
-                'train/loss': loss.item(),
-                'train/learning_rate': lr,
-                'train/gradient_step': global_step,
-                'train/wallclock_time': elapsed_time,
-                'train/tokens_per_second': (args.batch_size * args.context_length) / iteration_times[-1],
-                'train/time_per_iteration': iteration_times[-1],
-            }, step=global_step)
-        
-        # Logging
-        if (iteration + 1) % args.log_interval == 0:
-            avg_loss = np.mean(train_losses[-args.log_interval:])
-            avg_time = np.mean(iteration_times[-args.log_interval:])
-            tokens_per_sec = (args.batch_size * args.context_length) / avg_time
+    with torch.autocast(device_type="cuda", dtype=torch.float16):
+        for iteration in range(start_iteration, num_iterations):
+            iter_start_time = time.time()
             
-            elapsed = time.time() - train_start_time
-            print(f"Iter {iteration + 1}/{num_iterations} | "
-                  f"Loss: {avg_loss:.4f} | "
-                  f"LR: {lr:.2e} | "
-                  f"Tokens/sec: {tokens_per_sec:.0f} | "
-                  f"Time/iter: {avg_time:.3f}s | "
-                  f"Elapsed: {elapsed/60:.1f}min")
-        
-        # Validation
-        if (iteration + 1) % args.val_interval == 0:
-            val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
-                              device, args.val_batches)
-            print(f"Validation loss: {val_loss:.4f}")
+            # Get learning rate for this iteration
+            lr = cosine_lr_schedule(
+                iteration,
+                args.learning_rate,
+                args.min_learning_rate,
+                args.warmup_iters,
+                num_iterations
+            )
             
-            # Log validation metrics to wandb
+            # Update learning rate
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            
+            # Load batch
+            x, y = load_data(train_data, args.batch_size, args.context_length, device)
+            
+            # Forward pass
+            logits = model(x)
+            
+            # Calculate loss
+            # Reshape for cross entropy: (batch * seq_len, vocab_size)
+            logits_flat = logits.view(-1, logits.size(-1))
+            targets_flat = y.view(-1)
+            
+            loss = cross_entropy_loss(logits_flat, targets_flat)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            
+            # Gradient clipping
+            gradient_clipping(model.parameters(), args.grad_clip)
+            
+            # Optimizer step
+            optimizer.step()
+            
+            # Track metrics
+            train_losses.append(loss.item())
+            iteration_times.append(time.time() - iter_start_time)
+            global_step = iteration + 1
+            
+            # Calculate elapsed time
+            elapsed_time = time.time() - train_start_time
+            
+            # Log to wandb every step
             if not args.no_wandb:
                 wandb.log({
-                    'val/loss': val_loss,
-                    'val/gradient_step': global_step,
-                    'val/wallclock_time': elapsed_time,
+                    'train/loss': loss.item(),
+                    'train/learning_rate': lr,
+                    'train/gradient_step': global_step,
+                    'train/wallclock_time': elapsed_time,
+                    'train/tokens_per_second': (args.batch_size * args.context_length) / iteration_times[-1],
+                    'train/time_per_iteration': iteration_times[-1],
                 }, step=global_step)
+            
+            # Logging
+            if (iteration + 1) % args.log_interval == 0:
+                avg_loss = np.mean(train_losses[-args.log_interval:])
+                avg_time = np.mean(iteration_times[-args.log_interval:])
+                tokens_per_sec = (args.batch_size * args.context_length) / avg_time
+                
+                elapsed = time.time() - train_start_time
+                print(f"Iter {iteration + 1}/{num_iterations} | "
+                    f"Loss: {avg_loss:.4f} | "
+                    f"LR: {lr:.2e} | "
+                    f"Tokens/sec: {tokens_per_sec:.0f} | "
+                    f"Time/iter: {avg_time:.3f}s | "
+                    f"Elapsed: {elapsed/60:.1f}min")
+            
+            # Validation
+            if (iteration + 1) % args.val_interval == 0:
+                val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
+                                device, args.val_batches)
+                print(f"Validation loss: {val_loss:.4f}")
+                
+                # Log validation metrics to wandb
+                if not args.no_wandb:
+                    wandb.log({
+                        'val/loss': val_loss,
+                        'val/gradient_step': global_step,
+                        'val/wallclock_time': elapsed_time,
+                    }, step=global_step)
+            
+            # Save checkpoint
+            if (iteration + 1) % args.checkpoint_interval == 0:
+                checkpoint_file = os.path.join(
+                    checkpoint_path,
+                    f"checkpoint_iter_{iteration + 1}.pt"
+                )
+                save_checkpoint(model, optimizer, iteration + 1, checkpoint_file)
+                print(f"Saved checkpoint to {checkpoint_file}")
         
-        # Save checkpoint
-        if (iteration + 1) % args.checkpoint_interval == 0:
-            checkpoint_file = os.path.join(
-                checkpoint_path,
-                f"checkpoint_iter_{iteration + 1}.pt"
-            )
-            save_checkpoint(model, optimizer, iteration + 1, checkpoint_file)
-            print(f"Saved checkpoint to {checkpoint_file}")
-    
-    # Save final checkpoint
-    final_checkpoint_file = os.path.join(checkpoint_path, "final_checkpoint.pt")
-    save_checkpoint(model, optimizer, num_iterations, final_checkpoint_file)
-    print(f"Training complete! Final checkpoint saved to {final_checkpoint_file}")
-    
-    # Final validation
-    final_val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
-                            device, args.val_batches * 10)  # More batches for final eval
-    print(f"Final validation loss: {final_val_loss:.4f}")
-    
-    # Log final metrics to wandb
-    if not args.no_wandb:
-        final_elapsed_time = time.time() - train_start_time
-        wandb.log({
-            'final/val_loss': final_val_loss,
-            'final/total_training_time': final_elapsed_time,
-            'final/total_gradient_steps': num_iterations,
-        })
-        wandb.finish()
+        # Save final checkpoint
+        final_checkpoint_file = os.path.join(checkpoint_path, "final_checkpoint.pt")
+        save_checkpoint(model, optimizer, num_iterations, final_checkpoint_file)
+        print(f"Training complete! Final checkpoint saved to {final_checkpoint_file}")
+        
+        # Final validation
+        final_val_loss = evaluate(model, val_data, args.batch_size, args.context_length, 
+                                device, args.val_batches * 10)  # More batches for final eval
+        print(f"Final validation loss: {final_val_loss:.4f}")
+        
+        # Log final metrics to wandb
+        if not args.no_wandb:
+            final_elapsed_time = time.time() - train_start_time
+            wandb.log({
+                'final/val_loss': final_val_loss,
+                'final/total_training_time': final_elapsed_time,
+                'final/total_gradient_steps': num_iterations,
+            })
+            wandb.finish()
 
 
 if __name__ == "__main__":

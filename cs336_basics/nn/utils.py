@@ -41,15 +41,19 @@ def gradient_clipping(parameters: Iterable[nn.Parameter], max_norm: float):
             p.grad.detach().mul_(clip_coef)
 
 # assume prompt is a one dimension tensor with shape [seq_len]
-def decode(model: torch.nn.Module, prompt: torch.Tensor, special_token_id: int = -1, max_num_tokens: int | None = None, temperature: float | None = None, p: float | None = None) -> torch.Tensor:    
+@torch.no_grad()
+def decode(model: torch.nn.Module, prompt: torch.Tensor, context_length: int = 256, special_token_id: int = -1, max_num_tokens: int | None = None, temperature: float | None = None, p: float | None = None) -> torch.Tensor:    
     count = 0
+    if prompt.dim() == 1:
+        prompt = prompt.unsqueeze(0)
     while count < max_num_tokens:
         # shape [seq_len, vocab_size]
-        y = model(prompt.unsqueeze(0))
-        logits = y[0][-1]
+        prompt = prompt[:, -context_length :] if prompt.size(-1) > context_length else context_length
+        y = model(prompt)
+        logits = y[:, -1]
         if temperature is not None:
             logits = logits / temperature
-        probability = softmax(logits, dim=-1)
+        probabilities = softmax(logits, dim=-1)
         if p is not None:
             # 1. Sort probabilities and keep their original indices
             sorted_probs, sorted_indices = torch.sort(probabilities, descending=True)
@@ -69,10 +73,10 @@ def decode(model: torch.nn.Module, prompt: torch.Tensor, special_token_id: int =
             # 4. Re-normalize the remaining probabilities
             probabilities = probabilities / torch.sum(probabilities)
             
-        sampled_idx = np.random.choice(np.arange(len(probability)), p=probability)
-        prompt = torch.cat((prompt, torch.tensor([sampled_idx]).to(prompt.device)), dim=0)
+        sampled_idx = torch.multinomial(probability, num_samples=1)
+        prompt = torch.cat((prompt, sampled_idx.to(prompt.device)), dim=-1)
         count +=1
-        if sampled_idx == special_token_id:
+        if sampled_idx.item() == special_token_id:
             break
     
     return prompt
