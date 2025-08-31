@@ -235,7 +235,7 @@ def main():
         theta=args.rope_theta
     )
     model = model.to(device)
-    model = torch.compile(model)
+    # model = torch.compile(model)
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
